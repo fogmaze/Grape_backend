@@ -4,12 +4,14 @@ import random
 import json
 import urllib.parse
 import os
-import sqlite3 as sql
 from typing import List, Tuple
 from db import DataBaseOperator
 import scorer_py as scorer
+import gensim.downloader as api
+
 
 Scores = scorer.Scores()
+wv = api.load("word2vec-google-news-300")
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
@@ -45,9 +47,14 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
             objs = []
             nowTestingIdx = 0
+
+            extraFilter = ""
+            if parsed_query["method_name"][0] == "notes" :
+                extraFilter = "AND account='{}'".format(account)
+
             if not isLoad :
                 for method_name in methods:
-                    db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags)}")
+                    db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags)} {extraFilter}")
                     times = db_operator.cur.fetchall()
                     # get the results
                     for time in times:
@@ -68,7 +75,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     else :
                         nonTested.append(default_method_handler(method_name, time))
                 for method_name in methods :
-                    db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags)} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM()')
+                    db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags)} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM()')
                     results = db_operator.cur.fetchall()
                     for time in results:
                         if method_name in METHOD_HANDLER_DICT:
@@ -129,10 +136,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         
         elif parsed_query["type"][0] == "note" :
             db_operator = DataBaseOperator()
-            db_operator.cur.execute("SELECT time FROM notes WHERE method_name=? AND method_time=?", (parsed_query["method_name"][0], int(parsed_query["method_time"][0])))
+            db_operator.cur.execute("SELECT time FROM notes WHERE method_name=? AND method_time=? AND account=?", (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), parsed_query["account"][0]))
             result = db_operator.cur.fetchall()
             if len(result) == 0:
-                db_operator.cur.execute(f'INSERT INTO notes (method_name, method_time, tags, time) VALUES (?, ?, (SELECT tags FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }), strftime("%s","now"))', (parsed_query["method_name"][0], int(parsed_query["method_time"][0])))
+                db_operator.cur.execute(f'INSERT INTO notes (method_name, method_time, tags, time, account) VALUES (?, ?, (SELECT tags FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }), strftime("%s","now"), ?)', (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), parsed_query["account"][0]))
                 response = {
                     "status": "success"
                 }
@@ -216,6 +223,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         
         # get the the query
         query = urllib.parse.urlparse(self.path).query
+        print("post query: ", query)
         # parse the query
         parsed_query = urllib.parse.parse_qs(query)
         # get the json code form the body
@@ -224,7 +232,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
         if "type" not in parsed_query:
             # save the file into datas folder
-            with open("datas" + self.path, "wb") as f:
+            with open("interface" + self.path, "wb") as f:
                 f.write(post_data)
             
             # send status code
@@ -233,15 +241,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Accept", "*/*")
             self.end_headers()
+            if "highSchool.db" in self.path:
+                scorer.startScoring(scores=Scores, wv=wv)
             return
 
-        # get the the query
-        query = urllib.parse.urlparse(self.path).query
-        # parse the query
-        parsed_query = urllib.parse.parse_qs(query)
-        # get the json code form the body
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
         json_data = json.loads(post_data)
 
 
@@ -249,7 +252,9 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator = DataBaseOperator()
             operation = parsed_query["operation"][0]
             targetId = parsed_query["targetId"][0]
+            print("operation: ", operation)
             if operation == "reset" :
+                print("resetting record: ", targetId)
                 method_names = json_data["method_names"]
                 times = json_data["times"]
                 db_operator.cur.execute("DELETE FROM record_data WHERE id=?", (targetId,))
@@ -319,8 +324,8 @@ def en_voc_method_handler(method_name, time) :
             if r <= 0 :
                 db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j}")
                 print(j)
-                time = db_operator.cur.fetchone()[0]
-                related.append(default_method_handler(method_name, time))
+                time_related = db_operator.cur.fetchone()[0]
+                related.append(default_method_handler(method_name, time_related))
                 break
 
     ret = {
