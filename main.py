@@ -19,7 +19,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         response = {}
         # get the the query
         query = urllib.parse.urlparse(self.path).query
-        print("query: ", query)
         # parse the query
         parsed_query = urllib.parse.parse_qs(query)
         if "type" not in parsed_query:
@@ -49,12 +48,17 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             nowTestingIdx = 0
 
             extraFilter = ""
+            limit = 9999999
             if parsed_query["method_name"][0] == "notes" :
                 extraFilter = "AND account='{}'".format(account)
+            if parsed_query["tags"][0] == "random" :
+                limit = 80
+                print("random limit: ", limit)
 
-            if not isLoad :
+            if (not isLoad) or (parsed_query["tags"][0] == "random"):
                 for method_name in methods:
-                    db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags)} {extraFilter}")
+                    db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags)} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
+                    print(getFilter(tags))
                     times = db_operator.cur.fetchall()
                     # get the results
                     for time in times:
@@ -63,7 +67,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                         else :
                             objs.append(default_method_handler(method_name, time[0]))
                     # shuffle the results
-                    random.shuffle(objs)
+                random.shuffle(objs)
             else :
                 db_operator.cur.execute("SELECT time,method_name FROM record_data WHERE id=?", (nowId,))
                 results = db_operator.cur.fetchall()
@@ -75,7 +79,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     else :
                         nonTested.append(default_method_handler(method_name, time))
                 for method_name in methods :
-                    db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags)} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM()')
+                    db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags)} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
                     results = db_operator.cur.fetchall()
                     for time in results:
                         if method_name in METHOD_HANDLER_DICT:
@@ -181,7 +185,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Accept", "*/*")
             self.end_headers()
             # send the response
-            print("response: ", response)
             self.wfile.write(json.dumps(response).encode('utf-8'))
 
         # handle the file request
@@ -316,14 +319,13 @@ def en_voc_method_handler(method_name, time) :
             weights.append(0)
 
     weightsSum = sum(weights)
-    for i in range(5) :
+    for i in range(RELATED_NUM) :
         
         r = random.random() * weightsSum
         for j in range(Scores.n+1) :
             r -= weights[j]
             if r <= 0 :
                 db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j}")
-                print(j)
                 time_related = db_operator.cur.fetchone()[0]
                 related.append(default_method_handler(method_name, time_related))
                 break
@@ -362,29 +364,6 @@ def default_method_handler(method_name, time) :
     }
     return ret
     
-
-METHOD_NAME_TO_TABLE_NAME = {
-    "en_voc_def": "en_voc",
-    "en_voc_spe": "en_voc",
-    "en_prep_def": "en_prep",
-    "en_prep_spe": "en_prep",
-    "notes": "notes",
-}
-
-EMPTY_RELATED = {
-    "name": "en_voc_def",
-    "time": 0,
-    "que": "developing",
-    "ans": "developing",
-    "tags": "developing",
-}
-
-METHOD_HANDLER_DICT = {
-    "notes": notes_method_handler,
-    "en_voc_def": en_voc_method_handler,
-    "en_voc_spe": en_voc_method_handler,
-}
-
 def decodeList(str:str) -> List[str]:
     if str == "":
         return []
@@ -435,6 +414,8 @@ def getFilter(tags, minLevel=-1)->str:
     for lim in tagLimit_d:
         condition = []
         for tag in lim:
+            if tag == "|random|":
+                return "True"
             condition.append('tags like "%{}%"'.format(tag))
         tag_limits.append('(' + " AND ".join(condition) + ")")
     tag_limits = '(' + ' OR '.join(tag_limits) + ')'
@@ -442,6 +423,29 @@ def getFilter(tags, minLevel=-1)->str:
     result += tag_limits + " AND level >= {}".format(minLevel)
     return result
 
+METHOD_NAME_TO_TABLE_NAME = {
+    "en_voc_def": "en_voc",
+    "en_voc_spe": "en_voc",
+    "en_prep_def": "en_prep",
+    "en_prep_spe": "en_prep",
+    "notes": "notes",
+}
+
+EMPTY_RELATED = {
+    "name": "en_voc_def",
+    "time": 0,
+    "que": "developing",
+    "ans": "developing",
+    "tags": "developing",
+}
+
+METHOD_HANDLER_DICT = {
+    "notes": notes_method_handler,
+    "en_voc_def": en_voc_method_handler,
+    "en_voc_spe": en_voc_method_handler,
+}
+
+RELATED_NUM = 4
 if __name__ == "__main__":
     
     run(port=8000)
