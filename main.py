@@ -318,6 +318,11 @@ def en_voc_method_handler(method_name, time) :
         else :
             weights.append(0)
 
+    db_operator.cur.execute(f"SELECTT id FROM en_voc WHERE time IN (SELECT method_time FROM notes WHERE method_name={method_name})")
+    noted_ids = db_operator.cur.fetchall()
+    for noted_id in noted_ids :
+        weights[noted_id-1] * NOTED_EXTRA_WEIGHT
+    
     weightsSum = sum(weights)
     for i in range(RELATED_NUM) :
         
@@ -446,6 +451,7 @@ METHOD_HANDLER_DICT = {
 }
 
 RELATED_NUM = 4
+NOTED_EXTRA_WEIGHT = 3
 if __name__ == "__main__":
     
     run(port=8000)
