@@ -24,7 +24,10 @@ class Scores:
     
     def normalize(self):
         for i in range(len(self.data)):
-            self.data[i] /= np.sum(self.data[i])
+            sum = np.sum(self.data[i])
+            if sum == 0:
+                continue
+            self.data[i] = self.data[i] / sum
 
     def get(self, target, item):
         if target >= len(self.data) or item >= len(self.data):
@@ -46,6 +49,7 @@ def startScoring(scores:Scores = None, wv = None):
     db_operator = DataBaseOperator()
     db_operator.cur.execute("SELECT id FROM en_voc ORDER BY id DESC LIMIT 1")
     result = db_operator.cur.fetchone()
+    scores.put(1, result[0], 0.0)
     for i in tqdm.tqdm(range(scores.n-1, result[0]+1)):
         for j in range(1, i):
             if scores.get(i, j) <= 0:
@@ -58,7 +62,6 @@ def startScoring(scores:Scores = None, wv = None):
                     score = wv.similarity(word1, word2)
                 except:
                     pass
-
                 dis_score = (1-Levenshtein.distance(word1, word2)/ max(len(word1), len(word2))) * 0.5
                 score += dis_score
                 scores.put(i, j, score*score*score*score*score)

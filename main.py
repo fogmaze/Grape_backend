@@ -11,7 +11,8 @@ import gensim.downloader as api
 
 
 Scores = scorer.Scores()
-wv = api.load("word2vec-google-news-300")
+#wv = api.load("word2vec-google-news-300")
+wv = None
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
@@ -317,6 +318,7 @@ def en_voc_method_handler(method_name, time, account="") :
             weights.append(Scores.get(que_id, i))
         else :
             weights.append(0)
+    
 
     db_operator.cur.execute(f"SELECT id FROM en_voc WHERE time IN (SELECT method_time FROM notes WHERE method_name='{method_name}')")
     noted_ids = db_operator.cur.fetchall()
