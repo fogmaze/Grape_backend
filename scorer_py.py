@@ -20,11 +20,16 @@ class Scores:
             self.data = np.zeros((max(i, j)+1, max(i, j)+1))
             self.data[:len(old_data), :len(old_data)] = old_data
         self.data[max(i, j)][min(i, j)] = val
+        self.data[min(i, j)][max(i, j)] = val
+    
+    def normalize(self):
+        for i in range(len(self.data)):
+            self.data[i] /= np.sum(self.data[i])
 
-    def get(self, i, j):
-        if i >= len(self.data) or j >= len(self.data):
+    def get(self, target, item):
+        if target >= len(self.data) or item >= len(self.data):
             return 0.0
-        return self.data[max(i, j)][min(i, j)]
+        return self.data[item][target]
     
     def save(self):
         with open(data_filename, "wb") as f:
@@ -48,11 +53,18 @@ def startScoring(scores:Scores = None, wv = None):
                 word1 = db_operator.cur.fetchone()[0]
                 db_operator.cur.execute("SELECT que FROM en_voc WHERE id = ?", (j,))
                 word2 = db_operator.cur.fetchone()[0]
+                score = 0
                 try: 
                     score = wv.similarity(word1, word2)
                 except:
-                    score = 1-Levenshtein.distance(word1, word2)/ max(len(word1), len(word2))
-                scores.put(i, j, score*score*score*score)
+                    pass
+
+                dis_score = (1-Levenshtein.distance(word1, word2)/ max(len(word1), len(word2))) * 0.5
+                score += dis_score
+                scores.put(i, j, score*score*score*score*score)
+    scores.normalize()
     db_operator.close()
     scores.save()
 
+if __name__ == "__main__":
+    startScoring()

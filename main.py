@@ -65,7 +65,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                         if method_name in METHOD_HANDLER_DICT:
                             objs.append(METHOD_HANDLER_DICT[method_name](method_name, time[0]))
                         else :
-                            objs.append(default_method_handler(method_name, time[0]))
+                            objs.append(default_method_handler(method_name, time[0], account))
                     # shuffle the results
                 random.shuffle(objs)
             else :
@@ -77,7 +77,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     if method_name in METHOD_HANDLER_DICT:
                         nonTested.append(METHOD_HANDLER_DICT[method_name](method_name, time))
                     else :
-                        nonTested.append(default_method_handler(method_name, time))
+                        nonTested.append(default_method_handler(method_name, time, account))
                 for method_name in methods :
                     db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags)} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
                     results = db_operator.cur.fetchall()
@@ -85,7 +85,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                         if method_name in METHOD_HANDLER_DICT:
                             tested.append(METHOD_HANDLER_DICT[method_name](method_name, time[0]))
                         else :
-                            tested.append(default_method_handler(method_name, time[0]))
+                            tested.append(default_method_handler(method_name, time[0], account))
                     random.shuffle(tested)
                 objs = tested + nonTested
                 nowTestingIdx = len(tested)
@@ -282,7 +282,7 @@ def run(server_class=HTTPServer, handler_class=SimpleHTTPRequestHandler, port=80
     httpd.serve_forever()
 
 
-def notes_method_handler(method_name, time) :
+def notes_method_handler(method_name, time, account="") :
     db_operator = DataBaseOperator()
     db_operator.cur.execute(f"SELECT method_name, method_time FROM notes WHERE time = {time}")
     result = db_operator.cur.fetchall()
@@ -292,7 +292,7 @@ def notes_method_handler(method_name, time) :
     if method_name in METHOD_HANDLER_DICT:
         actual = METHOD_HANDLER_DICT[method_name](method_name, method_time)
     else :
-        actual = default_method_handler(method_name, method_time)
+        actual = default_method_handler(method_name, method_time, account=account)
     ret = {
         "name": "notes",
         "time": time,
@@ -300,7 +300,7 @@ def notes_method_handler(method_name, time) :
     }
     return ret
 
-def en_voc_method_handler(method_name, time) :
+def en_voc_method_handler(method_name, time, account="") :
     # get the cursor
     db_operator = DataBaseOperator()
     # execute the query
@@ -318,23 +318,28 @@ def en_voc_method_handler(method_name, time) :
         else :
             weights.append(0)
 
-    db_operator.cur.execute(f"SELECTT id FROM en_voc WHERE time IN (SELECT method_time FROM notes WHERE method_name={method_name})")
+    db_operator.cur.execute(f"SELECT id FROM en_voc WHERE time IN (SELECT method_time FROM notes WHERE method_name='{method_name}')")
     noted_ids = db_operator.cur.fetchall()
     for noted_id in noted_ids :
-        weights[noted_id-1] * NOTED_EXTRA_WEIGHT
+        weights[noted_id[0]-1] * NOTED_EXTRA_WEIGHT
     
     weightsSum = sum(weights)
     for i in range(RELATED_NUM) :
-        
         r = random.random() * weightsSum
         for j in range(Scores.n+1) :
             r -= weights[j]
             if r <= 0 :
                 db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j}")
                 time_related = db_operator.cur.fetchone()[0]
-                related.append(default_method_handler(method_name, time_related))
+                related.append(default_method_handler(method_name, time_related, account=account))
                 break
 
+    db_operator.cur.execute(f"SELECT time FROM notes WHERE method_time={time}")
+    note_time = db_operator.cur.fetchall()
+    if len(note_time) > 0:
+        note_time = note_time[0][0]
+    else :
+        note_time = 0
     ret = {
         "name": method_name,
         "time": time,
@@ -342,6 +347,7 @@ def en_voc_method_handler(method_name, time) :
         "ans": results[0][1],
         "tags": results[0][2],
         "tb": results[0][3],
+        "note_time": note_time,
         "related": related
     }
 
@@ -349,14 +355,23 @@ def en_voc_method_handler(method_name, time) :
 
     return ret
  
-def default_method_handler(method_name, time) :
+def default_method_handler(method_name, time, account="") :
     # get the cursor
     db_operator = DataBaseOperator()
     # execute the query
     sql_str = f"SELECT que,ans,tags,testing_blacklist FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE time = {time}"
     db_operator.cur.execute(sql_str)
+    
+    db_operator.cur.execute(f"SELECT time FROM notes WHERE method_time={time}")
+    note_time = db_operator.cur.fetchall()
+    
+    if len(note_time) > 0:
+        note_time = note_time[0][0]
+    else :
+        note_time = 0
     # get the results
     results = db_operator.cur.fetchall()
+
     db_operator.close()
     ret = {
         "name": method_name,
@@ -365,6 +380,7 @@ def default_method_handler(method_name, time) :
         "ans": results[0][1],
         "tags": results[0][2],
         "tb": results[0][3],
+        "note_time": note_time,
         "related": []
     }
     return ret
