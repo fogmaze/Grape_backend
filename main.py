@@ -11,8 +11,7 @@ import gensim.downloader as api
 
 
 Scores = scorer.Scores()
-#wv = api.load("word2vec-google-news-300")
-wv = None
+wv = api.load("word2vec-google-news-300")
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
