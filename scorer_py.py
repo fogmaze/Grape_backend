@@ -12,7 +12,7 @@ class Scores:
     def __init__(self):
         with open(data_filename, "rb") as f:
             self.data:np.ndarray = pickle.load(f)
-            self.n = len(self.data)
+            self.normalize()
     
     def put(self, i, j, val):
         if i >= len(self.data) or j >= len(self.data):
@@ -23,17 +23,21 @@ class Scores:
         self.data[min(i, j)][max(i, j)] = val
     
     def normalize(self):
-        for i in range(len(self.data)):
-            sum = np.sum(self.data[i])
-            if sum == 0:
+        self.normalized_data = self.data.copy()
+        for i in range(len(self.normalized_data)):
+            mean = np.mean(self.normalized_data[i])
+            if mean == 0:
                 continue
-            self.data[i] = self.data[i] / sum
+            self.normalized_data[i] = self.normalized_data[i] * (1/mean + 1)
 
     def get(self, target, item):
         if target >= len(self.data) or item >= len(self.data):
             return 0.0
-        return self.data[item][target]
+        return self.normalized_data[item][target]
     
+    def __len__(self):
+        return len(self.data)
+
     def save(self):
         with open(data_filename, "wb") as f:
             pickle.dump(self.data, f)
@@ -45,14 +49,13 @@ def startScoring(scores:Scores = None, wv = None):
         scores = Scores()
     if wv is None:
         wv = api.load("word2vec-google-news-300")
+        pass
 
     db_operator = DataBaseOperator()
     db_operator.cur.execute("SELECT id FROM en_voc ORDER BY id DESC LIMIT 1")
     result = db_operator.cur.fetchone()
-    scores.put(1, result[0], 0.0)
-    for i in tqdm.tqdm(range(scores.n-1, result[0]+1)):
+    for i in tqdm.tqdm(range(len(scores.data)-1, result[0]+1)):
         for j in range(1, i):
-            if scores.get(i, j) <= 0:
                 db_operator.cur.execute("SELECT que FROM en_voc WHERE id = ?", (i,))
                 word1 = db_operator.cur.fetchone()[0]
                 db_operator.cur.execute("SELECT que FROM en_voc WHERE id = ?", (j,))
@@ -62,7 +65,7 @@ def startScoring(scores:Scores = None, wv = None):
                     score = wv.similarity(word1, word2)
                 except:
                     pass
-                dis_score = (1-Levenshtein.distance(word1, word2)/ max(len(word1), len(word2))) * 0.5
+                dis_score = (1-Levenshtein.distance(word1, word2)/ max(len(word1), len(word2))) * 0.6
                 score += dis_score
                 scores.put(i, j, score*score*score*score*score)
     scores.normalize()

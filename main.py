@@ -8,10 +8,11 @@ from typing import List, Tuple
 from db import DataBaseOperator
 import scorer_py as scorer
 import gensim.downloader as api
+import argparse
 
 
 Scores = scorer.Scores()
-wv = api.load("word2vec-google-news-300")
+wv = None# = api.load("word2vec-google-news-300")
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
@@ -24,6 +25,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         if "type" not in parsed_query:
             pass
         elif parsed_query["type"][0] == "reget" :
+
             ret_value = []
             account = parsed_query["account"][0]
             method_name_str = parsed_query["method_name"][0]
@@ -52,7 +54,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             if parsed_query["method_name"][0] == "notes" :
                 extraFilter = "AND account='{}'".format(account)
             if parsed_query["tags"][0] == "random" :
-                limit = 80
+                limit = 20
                 print("random limit: ", limit)
 
             if (not isLoad) or (parsed_query["tags"][0] == "random"):
@@ -63,9 +65,11 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     # get the results
                     for time in times:
                         if method_name in METHOD_HANDLER_DICT:
-                            objs.append(METHOD_HANDLER_DICT[method_name](method_name, time[0]))
+                            objs.append(METHOD_HANDLER_DICT[method_name](method_name, time[0], account))
                         else :
                             objs.append(default_method_handler(method_name, time[0], account))
+                        # remove the None objects
+                        objs = [obj for obj in objs if obj is not None]
                     # shuffle the results
                 random.shuffle(objs)
             else :
@@ -75,7 +79,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 tested = []
                 for time, method_name in results :
                     if method_name in METHOD_HANDLER_DICT:
-                        nonTested.append(METHOD_HANDLER_DICT[method_name](method_name, time))
+                        nonTested.append(METHOD_HANDLER_DICT[method_name](method_name, time, account=account))
                     else :
                         nonTested.append(default_method_handler(method_name, time, account))
                 for method_name in methods :
@@ -83,10 +87,13 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     results = db_operator.cur.fetchall()
                     for time in results:
                         if method_name in METHOD_HANDLER_DICT:
-                            tested.append(METHOD_HANDLER_DICT[method_name](method_name, time[0]))
+                            tested.append(METHOD_HANDLER_DICT[method_name](method_name, time[0], account=account))
                         else :
                             tested.append(default_method_handler(method_name, time[0], account))
                     random.shuffle(tested)
+                # remove the None objects
+                tested = [obj for obj in tested if obj is not None]
+                nonTested = [obj for obj in nonTested if obj is not None]
                 objs = tested + nonTested
                 nowTestingIdx = len(tested)
                 if len(objs) == nowTestingIdx :
@@ -235,6 +242,8 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
         if "type" not in parsed_query:
             # save the file into datas folder
+            if not os.path.isdir("interface" + os.path.dirname(self.path)):
+                os.makedirs("interface" + os.path.dirname(self.path))
             with open("interface" + self.path, "wb") as f:
                 f.write(post_data)
             
@@ -245,7 +254,9 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Accept", "*/*")
             self.end_headers()
             if "highSchool.db" in self.path:
+                isScoring = True
                 scorer.startScoring(scores=Scores, wv=wv)
+                isScoring = False
             return
 
         json_data = json.loads(post_data)
@@ -287,12 +298,16 @@ def notes_method_handler(method_name, time, account="") :
     db_operator.cur.execute(f"SELECT method_name, method_time FROM notes WHERE time = {time}")
     result = db_operator.cur.fetchall()
     db_operator.close()
+    if (len(result) == 0):
+        return None
     method_name = result[0][0]
     method_time = result[0][1]
     if method_name in METHOD_HANDLER_DICT:
-        actual = METHOD_HANDLER_DICT[method_name](method_name, method_time)
+        actual = METHOD_HANDLER_DICT[method_name](method_name, method_time, account=account)
     else :
         actual = default_method_handler(method_name, method_time, account=account)
+    if actual is None:
+        return None
     ret = {
         "name": "notes",
         "time": time,
@@ -312,7 +327,7 @@ def en_voc_method_handler(method_name, time, account="") :
     related = []
     weights = []
     que_id = results[0][4]
-    for i in range(Scores.n+1) :
+    for i in range(len(Scores)+1) :
         if i != que_id :
             weights.append(Scores.get(que_id, i))
         else :
@@ -327,7 +342,7 @@ def en_voc_method_handler(method_name, time, account="") :
     weightsSum = sum(weights)
     for i in range(RELATED_NUM) :
         r = random.random() * weightsSum
-        for j in range(Scores.n+1) :
+        for j in range(len(Scores)+1) :
             r -= weights[j]
             if r <= 0 :
                 db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j}")
@@ -335,7 +350,7 @@ def en_voc_method_handler(method_name, time, account="") :
                 related.append(default_method_handler(method_name, time_related, account=account))
                 break
 
-    db_operator.cur.execute(f"SELECT time FROM notes WHERE method_time={time}")
+    db_operator.cur.execute(f"SELECT time FROM notes WHERE method_time={time} AND method_name='{method_name}' AND account='{account}'")
     note_time = db_operator.cur.fetchall()
     if len(note_time) > 0:
         note_time = note_time[0][0]
@@ -362,6 +377,8 @@ def default_method_handler(method_name, time, account="") :
     # execute the query
     sql_str = f"SELECT que,ans,tags,testing_blacklist FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE time = {time}"
     db_operator.cur.execute(sql_str)
+    # get the results
+    results = db_operator.cur.fetchall()
     
     db_operator.cur.execute(f"SELECT time FROM notes WHERE method_time={time}")
     note_time = db_operator.cur.fetchall()
@@ -370,8 +387,6 @@ def default_method_handler(method_name, time, account="") :
         note_time = note_time[0][0]
     else :
         note_time = 0
-    # get the results
-    results = db_operator.cur.fetchall()
 
     db_operator.close()
     ret = {
@@ -470,5 +485,11 @@ METHOD_HANDLER_DICT = {
 RELATED_NUM = 4
 NOTED_EXTRA_WEIGHT = 3
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-pre", "--pre", help="pre", action="store_true")
+    args = parser.parse_args()
+
+    if args.pre:
+        wv = api.load("word2vec-google-news-300")
     
     run(port=8000)
