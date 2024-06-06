@@ -13,6 +13,7 @@ import argparse
 
 Scores = scorer.Scores()
 wv = None# = api.load("word2vec-google-news-300")
+searchRecords = []
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
@@ -183,6 +184,50 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     "status": "failed"
                 }
             db_operator.close()
+
+        elif parsed_query["type"][0] == "search" :
+            db_operator = DataBaseOperator()
+            que = parsed_query["que"][0]
+            result = []
+
+            db_operator.cur.execute('SELECT que,ans FROM {} WHERE que LIKE "%{}%" ORDER BY TIME'.format("en_voc",que))
+            similar_data = db_operator.cur.fetchall()
+            if len(similar_data) > 0:
+                if similar_data == searchRecords:
+                    response = {
+                        "status": "same"
+                    }
+                else :
+                    response = {
+                        "status": "success",
+                        "data": similar_data[0:5]
+                    }
+            else:
+                response = {
+                    "status": "failed"
+                }
+            db_operator.close()
+        
+        elif parsed_query["type"][0] == "add" :
+            db_operator = DataBaseOperator()
+            que = parsed_query["que"][0]
+            ans = parsed_query["ans"][0]
+            tags = parsed_query["tags"][0]
+            
+            db_operator.cur.execute("SELECT tags FROM en_voc WHERE que=?", (que,))
+            old_tags = db_operator.cur.fetchall()
+            if len(old_tags) > 0:
+                finalTags = mergeEncodedTags(("|" + tags + "|", old_tags[0][0])) + "|"
+                db_operator.cur.execute("UPDATE en_voc SET ans=?, tags=?, time=strftime('%s','now') WHERE que=?", (ans, finalTags, que))
+            else :
+                finalTags = "|" + tags + "|"
+                db_operator.cur.execute("INSERT INTO en_voc (que, ans, tags, time) VALUES (?, ?, ?, strftime('%s','now'))", (que, ans, finalTags))
+            
+            db_operator.close()
+            response = {
+                "status": "success"
+            }
+
 
         if "type" in parsed_query :
             # send status code
