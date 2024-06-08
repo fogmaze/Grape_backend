@@ -1,4 +1,6 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import Levenshtein
+import threading
 import socket
 import random
 import json
@@ -192,6 +194,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
             db_operator.cur.execute('SELECT que,ans FROM {} WHERE que LIKE "%{}%" ORDER BY TIME'.format("en_voc",que))
             similar_data = db_operator.cur.fetchall()
+
             if len(similar_data) > 0:
                 if similar_data == searchRecords:
                     response = {
@@ -200,7 +203,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 else :
                     response = {
                         "status": "success",
-                        "data": similar_data[0:5]
+                        "data": sorted(similar_data, key=lambda x: Levenshtein.distance(que, x[0]))[0:5]
                     }
             else:
                 response = {
@@ -224,6 +227,13 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 db_operator.cur.execute("INSERT INTO en_voc (que, ans, tags, time) VALUES (?, ?, ?, strftime('%s','now'))", (que, ans, finalTags))
             
             db_operator.close()
+            response = {
+                "status": "success"
+            }
+        
+        elif parsed_query["type"][0] == "finishWriting" :
+            scoreThread = threading.Thread(target=scorer.startScoring, args=(Scores, wv))
+            scoreThread.start()
             response = {
                 "status": "success"
             }
