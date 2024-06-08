@@ -400,7 +400,7 @@ def en_voc_method_handler(method_name, time, account="") :
         for j in range(len(Scores)+1) :
             r -= weights[j]
             if r <= 0 :
-                db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j}")
+                db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j} AND tags NOT LIKE '|ckrb|'")
                 time_related = db_operator.cur.fetchone()[0]
                 related.append(default_method_handler(method_name, time_related, account=account))
                 break
