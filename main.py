@@ -207,7 +207,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     }
             else:
                 response = {
-                    "status": "failed"
+                    "status": "fail"
                 }
             db_operator.close()
         
