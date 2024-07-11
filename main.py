@@ -31,12 +31,17 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
             ret_value = []
             account = parsed_query["account"][0]
+            if "method_name" not in parsed_query:
+                return
             method_name_str = parsed_query["method_name"][0]
             methods = method_name_str.split("|")
             tag_raw_str = parsed_query["tags"][0].replace("^","&")
             tags = decodeTags(tag_raw_str)
             tags_str = encodeTags(tags)
             isLoad = parsed_query["isLoad"][0] == "true"
+            minLevel = int(parsed_query["minLevel"][0])
+            maxLevel = int(parsed_query["maxLevel"][0])
+
             db_operator = DataBaseOperator()
             db_operator.cur.execute("SELECT id from record_list WHERE method_names=? AND tags=? AND account=?", (method_name_str, tags_str, account))
             ids = db_operator.cur.fetchall()
@@ -52,18 +57,18 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             objs = []
             nowTestingIdx = 0
 
-            extraFilter = ""
             limit = 9999999
-            if parsed_query["method_name"][0] == "notes" :
-                extraFilter = "AND account='{}'".format(account)
+            noteExtraFilter = "AND account='{}'".format(account)
             if parsed_query["tags"][0] == "random" :
                 limit = 20
                 print("random limit: ", limit)
 
             if (not isLoad) or (parsed_query["tags"][0] == "random"):
                 for method_name in methods:
-                    db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags)} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
-                    print(getFilter(tags))
+                    extraFilter = ""
+                    if (method_name == "notes"):
+                        extraFilter = noteExtraFilter
+                    db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags, (minLevel, maxLevel))} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
                     times = db_operator.cur.fetchall()
                     # get the results
                     for time in times:
@@ -86,7 +91,14 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     else :
                         nonTested.append(default_method_handler(method_name, time, account))
                 for method_name in methods :
-                    db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags)} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
+                    if method_name == "":
+                        continue
+                    extraFilter = ""
+                    if (method_name == "notes"):
+                        extraFilter = noteExtraFilter
+                    sql_str = f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags, (minLevel, maxLevel))} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}'
+                    print(sql_str)
+                    db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags, (minLevel, maxLevel))} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
                     results = db_operator.cur.fetchall()
                     for time in results:
                         if method_name in METHOD_HANDLER_DICT:
@@ -111,7 +123,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             for obj in objs:
                 db_operator.cur.execute("INSERT INTO record_data (id, method_name, time) VALUES (?, ?, ?)", (nowId, obj["name"], obj["time"]))
             # save to settings
-            db_operator.cur.execute("UPDATE settings SET te_methods=?, te_tags=?, te_lp=?, te_level=? WHERE account=?", (method_name_str, tags_str, 1 if parsed_query["isLoad"][0] == "true" else 0, int(parsed_query["level"][0]), account))
+            db_operator.cur.execute("UPDATE settings SET te_methods=?, te_tags=?, te_lp=?, te_level=?, te_level_max=? WHERE account=?", (method_name_str, tags_str, 1 if parsed_query["isLoad"][0] == "true" else 0, int(parsed_query["minLevel"][0]), int(parsed_query["maxLevel"][0]), account))
 
             db_operator.close()
 
@@ -132,7 +144,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
         elif parsed_query["type"][0] == "getParam" :
             db_operator = DataBaseOperator()
-            db_operator.cur.execute("SELECT te_methods,te_tags,te_lp,te_level FROM settings WHERE account=?", (parsed_query["account"][0],))
+            db_operator.cur.execute("SELECT te_methods,te_tags,te_lp,te_level,te_level_max FROM settings WHERE account=?", (parsed_query["account"][0],))
             result = db_operator.cur.fetchall()
             if len(result) == 0:
                 response = {
@@ -144,7 +156,8 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     "methods": result[0],
                     "tags": result[1],
                     "lp": str(result[2]),
-                    "level": str(result[3])
+                    "level": str(result[3]),
+                    "level_max": str(result[4]),
                 }
             db_operator.close()
         
@@ -153,7 +166,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator.cur.execute("SELECT time FROM notes WHERE method_name=? AND method_time=? AND account=?", (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), parsed_query["account"][0]))
             result = db_operator.cur.fetchall()
             if len(result) == 0:
-                db_operator.cur.execute(f'INSERT INTO notes (method_name, method_time, tags, time, account) VALUES (?, ?, (SELECT tags FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }), strftime("%s","now"), ?)', (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), parsed_query["account"][0]))
+                db_operator.cur.execute(f'INSERT INTO notes (method_name, method_time, tags, time, account, level) VALUES (?, ?, (SELECT tags FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }), strftime("%s","now"), ?, (SELECT level FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }))', (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), parsed_query["account"][0]))
                 response = {
                     "status": "success"
                 }
@@ -166,10 +179,18 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         
         elif parsed_query["type"][0] == "unote" :
             db_operator = DataBaseOperator()
-            db_operator.cur.execute("DELETE FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
-            response = {
-                "status": "success"
-            }
+            db_operator.cur.execute("SELECT COUNT(*) FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
+            result = db_operator.cur.fetchall()
+            if len(result) == 0:
+                response = {
+                    "status": "failed"
+                }
+            else:
+                db_operator.cur.execute("DELETE FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
+                response = {
+                    "status": "success"
+                }
+                print("unote: ", parsed_query["time"][0])
             db_operator.close()
 
         elif parsed_query["type"][0] == "createAccount" :
@@ -177,7 +198,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator.cur.execute("SELECT account FROM settings WHERE account=?", (parsed_query["account"][0],))
             result = db_operator.cur.fetchall()
             if len(result) == 0:
-                db_operator.cur.execute("INSERT INTO settings (account, te_methods, te_tags, te_lp, te_level) VALUES (?, ?, ?, ?, ?)", (parsed_query["account"][0], "", "", 0, 0))
+                db_operator.cur.execute("INSERT INTO settings (account, te_methods, te_tags, te_lp, te_level, te_level_max) VALUES (?, ?, ?, ?, ?, 6)", (parsed_query["account"][0], "", "", 0, 0))
                 response = {
                     "status": "success"
                 }
@@ -215,7 +236,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator = DataBaseOperator()
             que = parsed_query["que"][0]
             ans = parsed_query["ans"][0]
-            tags = parsed_query["tags"][0]
+            if not "tags" in parsed_query:
+                tags = ""
+            else:
+                tags = parsed_query["tags"][0]
             
             db_operator.cur.execute("SELECT tags FROM en_voc WHERE que=?", (que,))
             old_tags = db_operator.cur.fetchall()
@@ -224,7 +248,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 db_operator.cur.execute("UPDATE en_voc SET ans=?, tags=?, time=strftime('%s','now') WHERE que=?", (ans, finalTags, que))
             else :
                 finalTags = "|" + tags + "|"
-                db_operator.cur.execute("INSERT INTO en_voc (que, ans, tags, time) VALUES (?, ?, ?, strftime('%s','now'))", (que, ans, finalTags))
+                db_operator.cur.execute("INSERT INTO en_voc (que, ans, tags, time, level) VALUES (?, ?, ?, strftime('%s','now'), ?)", (que, ans, finalTags, getLevelFromWord(que)))
             
             db_operator.close()
             response = {
@@ -234,8 +258,14 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         elif parsed_query["type"][0] == "finishWriting" :
             scoreThread = threading.Thread(target=scorer.startScoring, args=(Scores, wv))
             scoreThread.start()
+            updateTagList()
             response = {
                 "status": "success"
+            }
+
+        elif parsed_query["type"][0] == "getTags" :
+            response = {
+                "tags": getTagList()
             }
 
 
@@ -312,6 +342,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 isScoring = True
                 scorer.startScoring(scores=Scores, wv=wv)
                 isScoring = False
+                updateTagList()
             return
 
         json_data = json.loads(post_data)
@@ -366,6 +397,7 @@ def notes_method_handler(method_name, time, account="") :
     ret = {
         "name": "notes",
         "time": time,
+        "level": actual["level"],
         "actual": actual,
     }
     return ret
@@ -374,13 +406,16 @@ def en_voc_method_handler(method_name, time, account="") :
     # get the cursor
     db_operator = DataBaseOperator()
     # execute the query
-    sql_str = f"SELECT que,ans,tags,testing_blacklist,id FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE time = {time}"
+    sql_str = f"SELECT que,ans,tags,testing_blacklist,id,level FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE time = {time}"
     db_operator.cur.execute(sql_str)
     # get the results
     results = db_operator.cur.fetchall()
 
     related = []
     weights = []
+    if len(results) == 0:
+        print("no result found for ", method_name, time)
+        return None
     que_id = results[0][4]
     for i in range(len(Scores)+1) :
         if i != que_id :
@@ -419,6 +454,7 @@ def en_voc_method_handler(method_name, time, account="") :
         "tags": results[0][2],
         "tb": results[0][3],
         "note_time": note_time,
+        "level": results[0][5],
         "related": related
     }
 
@@ -430,12 +466,12 @@ def default_method_handler(method_name, time, account="") :
     # get the cursor
     db_operator = DataBaseOperator()
     # execute the query
-    sql_str = f"SELECT que,ans,tags,testing_blacklist FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE time = {time}"
+    sql_str = f"SELECT que,ans,tags,testing_blacklist,level FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE time = {time}"
     db_operator.cur.execute(sql_str)
     # get the results
     results = db_operator.cur.fetchall()
     
-    db_operator.cur.execute(f"SELECT time FROM notes WHERE method_time={time}")
+    db_operator.cur.execute(f"SELECT time FROM notes WHERE method_time={time} AND account='{account}'")
     note_time = db_operator.cur.fetchall()
     
     if len(note_time) > 0:
@@ -451,6 +487,7 @@ def default_method_handler(method_name, time, account="") :
         "ans": results[0][1],
         "tags": results[0][2],
         "tb": results[0][3],
+        "level": results[0][4],
         "note_time": note_time,
         "related": []
     }
@@ -497,7 +534,7 @@ def mergeEncodedTags(strs:Tuple[str]):
                 all_tags.append(tag)
     return encodeTags(all_tags)
 
-def getFilter(tags, minLevel=-1)->str:
+def getFilter(tags, levelRange)->str:
     tagLimit_d = tags
     if len(tagLimit_d) == 0:
         return ""
@@ -507,19 +544,155 @@ def getFilter(tags, minLevel=-1)->str:
         condition = []
         for tag in lim:
             if tag == "|random|":
-                return "True"
+                return "level >= {} AND level <= {}".format(levelRange[0], levelRange[1])
             condition.append('tags like "%{}%"'.format(tag))
         tag_limits.append('(' + " AND ".join(condition) + ")")
     tag_limits = '(' + ' OR '.join(tag_limits) + ')'
     result = ""
-    result += tag_limits + " AND level >= {}".format(minLevel)
+    result += tag_limits + " AND level >= {} AND level <= {}".format(levelRange[0], levelRange[1])
     return result
+
+def updateTagList() :
+    db_operator = DataBaseOperator()
+    db_operator.cur.execute("SELECT tags, time FROM en_voc ORDER BY time DESC")
+    tags :List[str]= db_operator.cur.fetchall()
+    result = {}
+    for (tag, time) in tags:
+        if "mag" in tag and not "other" in tag:
+            if len(tag.split("|")) == 5 and "-" not in tag:
+                if tag not in result:
+                    result[tag] = time
+            elif len(tag.split("|")) == 4:
+                if tag not in result:
+                    result[tag] = time
+        if ("ea" in tag or "build" in tag) and len(tag.split("|")) == 4:
+            if tag not in result:
+                result[tag] = time
+        if "tb" in tag and not "other" in tag:
+            if len(tag.split("|")) == 5 and "-" not in tag:
+                if tag not in result:
+                    result[tag] = time
+            elif len(tag.split("|")) == 4:
+                if tag not in result:
+                    result[tag] = time
+    
+    db_operator.cur.execute("DELETE FROM tag_list")
+    for tag in result:
+        db_operator.cur.execute("INSERT INTO tag_list (tag, time) VALUES (?, ?)", (tag, result[tag]))
+    extra = ["other", "GSAT"]
+    for tag in extra:
+        db_operator.cur.execute("INSERT INTO tag_list (tag, time) VALUES (?, strftime('%s','now'))", (tag,))
+    db_operator.close()
+
+def getTagList() -> List[str]:
+    db_operator = DataBaseOperator()
+    db_operator.cur.execute("SELECT tag FROM tag_list ORDER BY time DESC")
+    tags = db_operator.cur.fetchall()
+    result = []
+    for (tag,) in tags:
+        if "|" in tag:
+            result.append("&".join(tag.split("|")[1:-1]))
+        else :
+            result.append(tag)
+    db_operator.close()
+    return result
+
+def loadWV() :
+    global wv
+    tmp = api.load("word2vec-google-news-300")
+    wv = tmp
+
+def getLevelFromWord(word:str) -> int:
+    spl = word.split(" ")
+    maxLevel = 0
+    for w in spl:
+        tar = [w]
+        if "ly" in w:
+            tar.append(w[:-2])
+        if "ed" in w:
+            tar.append(w[:-2])
+            tar.append(w[:-1])
+        if "ness" in w:
+            tar.append(w[:-4])
+        if "ing" in w:
+            tar.append(w[:-3])
+        if "ful" in w:
+            tar.append(w[:-3])
+            tar.append(w[2:])
+        if "re" in w or "un" in w or "in" in w or "im" in w or "ir" in w or "il" in w:
+            tar.append(w[2:])
+        tar.append(w+"(ment)")
+
+        for t in tar:
+            for i in range(1, 7) :
+                if t in wordList[str(i)]:
+                    if i > maxLevel:
+                        maxLevel = i
+    return maxLevel
+
+def updateUnAdded() :
+    db_operator = DataBaseOperator()
+    db_operator.cur.execute("SELECT que FROM en_voc")
+    result = db_operator.cur.fetchall()
+
+    for (que,) in result:
+        spl = que.split(" ")
+        maxLevel = 0
+        stdWord = ""
+        for w in spl:
+            tar = [w]
+            if "ly" in w:
+                tar.append(w[:-2])
+            if "ed" in w:
+                tar.append(w[:-2])
+                tar.append(w[:-1])
+            if "ness" in w:
+                tar.append(w[:-4])
+            if "ing" in w:
+                tar.append(w[:-3])
+            if "ful" in w:
+                tar.append(w[:-3])
+                tar.append(w[2:])
+            if "re" in w or "un" in w or "in" in w or "im" in w or "ir" in w or "il" in w:
+                tar.append(w[2:])
+            tar.append(w+"(ment)")
+
+            for t in tar:
+                for i in range(1, 7) :
+                    if t in wordList[str(i)]:
+                        if i > maxLevel:
+                            maxLevel = i
+                            stdWord = t
+        
+        db_operator.cur.execute("UPDATE std SET has=1 WHERE word=?", (stdWord,))
+    db_operator.close()
+
+def updateLevel() :
+    db_operator = DataBaseOperator()
+    db_operator.cur.execute("SELECT que FROM en_voc")
+    result = db_operator.cur.fetchall()
+    for (que,) in result:
+        level = getLevelFromWord(que)
+        print(que, level)
+        db_operator.cur.execute("UPDATE en_voc SET level=? WHERE que=?", (getLevelFromWord(que), que))
+
+    db_operator.cur.execute("SELECT method_name, method_time FROM notes")
+    result = db_operator.cur.fetchall()
+    for (method_name, method_time) in result:
+        db_operator.cur.execute(f"SELECT que FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE time={method_time}")
+        que = db_operator.cur.fetchall()
+        if len(que) > 0:
+            que = que[0][0]
+            db_operator.cur.execute("UPDATE notes SET level=? WHERE method_time=?", (getLevelFromWord(que), method_time))
+    
+    db_operator.close()
 
 METHOD_NAME_TO_TABLE_NAME = {
     "en_voc_def": "en_voc",
     "en_voc_spe": "en_voc",
     "en_prep_def": "en_prep",
     "en_prep_spe": "en_prep",
+    "en_prep_ans": "en_prep",
     "notes": "notes",
 }
 
@@ -536,15 +709,18 @@ METHOD_HANDLER_DICT = {
     "en_voc_def": en_voc_method_handler,
     "en_voc_spe": en_voc_method_handler,
 }
+with open("wordList.json", "r") as f:
+    wordList = json.load(f)
 
 RELATED_NUM = 4
 NOTED_EXTRA_WEIGHT = 3
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-pre", "--pre", help="pre", action="store_true")
     args = parser.parse_args()
 
     if args.pre:
-        wv = api.load("word2vec-google-news-300")
+        loadWV()
     
     run(port=8000)

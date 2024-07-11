@@ -4,15 +4,21 @@ import tqdm
 import Levenshtein
 import pickle
 import numpy as np
+import os
 
 
 data_filename = "interface/data_np.pkl"
 
 class Scores: 
     def __init__(self):
-        with open(data_filename, "rb") as f:
-            self.data:np.ndarray = pickle.load(f)
-            self.normalize()
+        if os.path.isfile(data_filename):
+            with open(data_filename, "rb") as f:
+                self.data:np.ndarray = pickle.load(f)
+                self.normalize()
+        else:
+            self.data = np.array([])
+            self.normalized_data = np.array([])
+
     
     def put(self, i, j, val):
         if i >= len(self.data) or j >= len(self.data):
@@ -56,18 +62,27 @@ def startScoring(scores:Scores = None, wv = None):
     result = db_operator.cur.fetchone()
     for i in tqdm.tqdm(range(len(scores.data)-1, result[0]+1)):
         for j in range(1, i):
-                db_operator.cur.execute("SELECT que FROM en_voc WHERE id = ?", (i,))
-                word1 = db_operator.cur.fetchone()[0]
-                db_operator.cur.execute("SELECT que FROM en_voc WHERE id = ?", (j,))
-                word2 = db_operator.cur.fetchone()[0]
+                db_operator.cur.execute("SELECT que, tags FROM en_voc WHERE id = ?", (i,))
+                result = db_operator.cur.fetchone()
+                db_operator.cur.execute("SELECT que, tags FROM en_voc WHERE id = ?", (j,))
+                result2 = db_operator.cur.fetchone()
+                if result is None or result2 is None:
+                    scores.put(i, j, 0)
+                    continue
+                elif "ckrb-1" in result[1] or "ckrb-1" in result2[1]:
+                    scores.put(i, j, 0)
+                    continue
+                word1 = result[0]
+                word2 = result2[0]
                 score = 0
                 try: 
                     score = wv.similarity(word1, word2)
                 except:
                     pass
                 dis_score = (1-Levenshtein.distance(word1, word2)/ max(len(word1), len(word2))) * 0.6
-                score += dis_score
-                scores.put(i, j, score*score*score*score*score)
+                score = score * score * score * score * score
+                score += dis_score * dis_score * dis_score * dis_score * dis_score
+                scores.put(i, j, score)
     scores.normalize()
     db_operator.close()
     scores.save()
