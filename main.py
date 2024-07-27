@@ -1,4 +1,5 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import requests
 import Levenshtein
 import threading
 import socket
@@ -19,6 +20,25 @@ wv = None# = api.load("word2vec-google-news-300")
 searchRecords = []
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+
+    def handle_getSentence(self, query) :
+        word = query["word"][0]
+        meaning = query["meaning"][0]
+        s = getSentence(word, meaning)
+        return {
+            "status": "success",
+            "sentence": s
+        }
+
+    def handle_regenerateSentence(self, query) :
+        word = query["word"][0]
+        meaning = query["meaning"][0]
+        s = reGenerateSentence(word, meaning)
+        return {
+            "status": "success",
+            "sentence": s
+        }
+
 
     def do_GET(self):
         response = {}
@@ -272,6 +292,11 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             response = {
                 "tags": getTagList()
             }
+        
+        elif parsed_query["type"][0] == "getSentence" :
+            response = self.handle_getSentence(parsed_query)
+        elif parsed_query["type"][0] == "RegenerateSentence":
+            response = self.handle_regenerateSentence(parsed_query)
 
 
         if "type" in parsed_query :
@@ -695,6 +720,76 @@ def updateLevel() :
             db_operator.cur.execute("UPDATE notes SET level=? WHERE method_time=?", (getLevelFromWord(que), method_time))
     
     db_operator.close()
+
+def getSentence(word, meaning): 
+    db_operator = DataBaseOperator()
+    db_operator.cur.execute("SELECT sentence,ans FROM en_voc WHERE que=?", (word,))
+    result = db_operator.cur.fetchall()
+    db_operator.close()
+    if len(result) == 0:
+        return "err: no sentence found"
+    if result[0][0] == "Generating":
+        meanings = result[0][1].split("|")
+        db_operator = DataBaseOperator()
+        db_operator.cur.execute("UPDATE en_voc SET sentence=? WHERE que=?", ("|".join(["Ungenerated"]*len(meanings)), word))
+        db_operator.close()
+        return reGenerateSentence(word, meaning)
+    sentences = result[0][0].split("|")
+    meanings = result[0][1].split("|")
+    for i in range(len(sentences)):
+        if meaning == meanings[i]:
+            if sentences[i] == "Ungenerated":
+                return reGenerateSentence(word, meaning)
+            return sentences[i]
+    return "err: meaning not matched"
+
+def reGenerateSentence(word, meaning):
+    db_operator = DataBaseOperator()
+    db_operator.cur.execute("SELECT sentence,ans FROM en_voc WHERE que=?", (word,))
+    result = db_operator.cur.fetchall()
+    if len(result) == 0:
+        db_operator.close()
+        return "err: no sentence found"
+    sentences = result[0][0].split("|")
+    meanings = result[0][1].split("|")
+    for i in range(len(sentences)):
+        if meaning == meanings[i]:
+            respond_sentence = requestSentence(word, meaning)
+            sentences[i] = respond_sentence
+            new_sentence_str = "|".join(sentences)
+            db_operator.cur.execute("UPDATE en_voc SET sentence=? WHERE que=?", (new_sentence_str, word))
+            db_operator.close()
+            return respond_sentence
+    db_operator.close()
+    return "err: meaning not matched"
+
+def requestSentence(word, meaning) -> str:
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer " + OPENAI_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You will receive a word and it's Chinese meaning, please provide a very short example sentence."
+                },
+                {
+                    "role": "user",
+                    "content": word + "/" + meaning
+                }
+            ]
+        }
+    )
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"]
+
+with open("configure.json", "r") as f:
+    configureJson = json.load(f)
+    OPENAI_API_KEY = configureJson["OPENAI_API_KEY"]
 
 METHOD_NAME_TO_TABLE_NAME = {
     "en_voc_def": "en_voc",
