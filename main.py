@@ -11,6 +11,7 @@ from db import DataBaseOperator
 import scorer_py as scorer
 import gensim.downloader as api
 import argparse
+import time as time_module
 
 
 Scores = scorer.Scores()
@@ -58,7 +59,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             nowTestingIdx = 0
 
             limit = 9999999
-            noteExtraFilter = "AND account='{}'".format(account)
+            noteExtraFilter = "AND account='{}' AND method_name NOT LIKE 'en_prep%'".format(account)
             if parsed_query["tags"][0] == "random" :
                 limit = 20
                 print("random limit: ", limit)
@@ -71,11 +72,11 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags, (minLevel, maxLevel))} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
                     times = db_operator.cur.fetchall()
                     # get the results
-                    for time in times:
+                    for t in times:
                         if method_name in METHOD_HANDLER_DICT:
-                            objs.append(METHOD_HANDLER_DICT[method_name](method_name, time[0], account))
+                            objs.append(METHOD_HANDLER_DICT[method_name](method_name, t[0], account))
                         else :
-                            objs.append(default_method_handler(method_name, time[0], account))
+                            objs.append(default_method_handler(method_name, t[0], account))
                         # remove the None objects
                         objs = [obj for obj in objs if obj is not None]
                     # shuffle the results
@@ -96,8 +97,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     extraFilter = ""
                     if (method_name == "notes"):
                         extraFilter = noteExtraFilter
-                    sql_str = f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags, (minLevel, maxLevel))} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}'
-                    print(sql_str)
                     db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags, (minLevel, maxLevel))} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
                     results = db_operator.cur.fetchall()
                     for time in results:
@@ -120,7 +119,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             }
             # save to database
             db_operator.cur.execute("DELETE FROM record_data WHERE id=?", (nowId,))
-            for obj in objs:
+            for obj in objs[nowTestingIdx:]:
                 db_operator.cur.execute("INSERT INTO record_data (id, method_name, time) VALUES (?, ?, ?)", (nowId, obj["name"], obj["time"]))
             # save to settings
             db_operator.cur.execute("UPDATE settings SET te_methods=?, te_tags=?, te_lp=?, te_level=?, te_level_max=? WHERE account=?", (method_name_str, tags_str, 1 if parsed_query["isLoad"][0] == "true" else 0, int(parsed_query["minLevel"][0]), int(parsed_query["maxLevel"][0]), account))
@@ -155,7 +154,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 response = {
                     "methods": result[0],
                     "tags": result[1],
-                    "lp": str(result[2]),
+                    "lp": "1",
                     "level": str(result[3]),
                     "level_max": str(result[4]),
                 }
@@ -166,9 +165,12 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator.cur.execute("SELECT time FROM notes WHERE method_name=? AND method_time=? AND account=?", (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), parsed_query["account"][0]))
             result = db_operator.cur.fetchall()
             if len(result) == 0:
-                db_operator.cur.execute(f'INSERT INTO notes (method_name, method_time, tags, time, account, level) VALUES (?, ?, (SELECT tags FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }), strftime("%s","now"), ?, (SELECT level FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }))', (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), parsed_query["account"][0]))
+                nowTime = int(time_module.time())
+                db_operator.cur.execute(f'INSERT INTO notes (method_name, method_time, tags, time, account, level) VALUES (?, ?, (SELECT tags FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }), ?, ?, (SELECT level FROM {METHOD_NAME_TO_TABLE_NAME[parsed_query["method_name"][0]]} WHERE time={int(parsed_query["method_time"][0]) }))', (parsed_query["method_name"][0], int(parsed_query["method_time"][0]), nowTime, parsed_query["account"][0]))
+                note_time = db_operator.cur.fetchall()
                 response = {
-                    "status": "success"
+                    "status": "success",
+                    "time": nowTime
                 }
             else :
                 response = {
@@ -178,14 +180,17 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator.close()
         
         elif parsed_query["type"][0] == "unote" :
+            print("unote")
             db_operator = DataBaseOperator()
-            db_operator.cur.execute("SELECT COUNT(*) FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
+            db_operator.cur.execute("SELECT method_name,method_time FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
             result = db_operator.cur.fetchall()
             if len(result) == 0:
                 response = {
                     "status": "failed"
                 }
             else:
+                db_operator.cur.execute(f"SELECT que from {METHOD_NAME_TO_TABLE_NAME[result[0][0]]} WHERE time={result[0][1]}")
+                print("unote: " , db_operator.cur.fetchall())
                 db_operator.cur.execute("DELETE FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
                 response = {
                     "status": "success"
@@ -245,7 +250,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             old_tags = db_operator.cur.fetchall()
             if len(old_tags) > 0:
                 finalTags = mergeEncodedTags(("|" + tags + "|", old_tags[0][0])) + "|"
-                db_operator.cur.execute("UPDATE en_voc SET ans=?, tags=?, time=strftime('%s','now') WHERE que=?", (ans, finalTags, que))
+                db_operator.cur.execute("UPDATE en_voc SET ans=?, tags=? WHERE que=?", (ans, finalTags, que))
             else :
                 finalTags = "|" + tags + "|"
                 db_operator.cur.execute("INSERT INTO en_voc (que, ans, tags, time, level) VALUES (?, ?, ?, strftime('%s','now'), ?)", (que, ans, finalTags, getLevelFromWord(que)))
@@ -435,8 +440,12 @@ def en_voc_method_handler(method_name, time, account="") :
         for j in range(len(Scores)+1) :
             r -= weights[j]
             if r <= 0 :
-                db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j} AND tags NOT LIKE '|ckrb|'")
-                time_related = db_operator.cur.fetchone()[0]
+                db_operator.cur.execute(f"SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE id = {j}")
+                time_related = db_operator.cur.fetchone()
+                if time_related is None:
+                    print("id not found: ", j)
+                    break
+                time_related = time_related[0]
                 related.append(default_method_handler(method_name, time_related, account=account))
                 break
 
