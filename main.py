@@ -1,4 +1,5 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 import requests
 import Levenshtein
 import threading
@@ -19,6 +20,9 @@ Scores = scorer.Scores()
 wv = None# = api.load("word2vec-google-news-300")
 searchRecords = []
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in a separate thread."""
+
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def handle_getSentence(self, query) :
@@ -37,6 +41,41 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         return {
             "status": "success",
             "sentence": s
+        }
+    
+    def handle_getDefinition(self, query) :
+        word = query["word"][0]
+        s = requestDefinitionToGood(word)
+        return {
+            "status": "success",
+            "definition": s
+        }
+
+    def handle_add(self, query) :
+        if "que" not in query or "ans" not in query:
+            return {
+                "status": "fail"
+            }
+        db_operator = DataBaseOperator()
+        que = query["que"][0]
+        ans = query["ans"][0]
+        if not "tags" in query:
+            tags = ""
+        else:
+            tags = query["tags"][0]
+            
+        db_operator.cur.execute("SELECT tags FROM en_voc WHERE que=?", (que,))
+        old_tags = db_operator.cur.fetchall()
+        if len(old_tags) > 0:
+            finalTags = mergeEncodedTags(("|" + tags + "|", old_tags[0][0])) + "|"
+            db_operator.cur.execute('UPDATE en_voc SET ans=?, tags=?, sentence="Generating" WHERE que=?', (ans, finalTags, que))
+        else :
+            finalTags = "|" + tags + "|"
+            db_operator.cur.execute("INSERT INTO en_voc (que, ans, tags, time, level) VALUES (?, ?, ?, strftime('%s','now'), ?)", (que, ans, finalTags, getLevelFromWord(que)))
+            
+        db_operator.close()
+        return {
+            "status": "success"
         }
 
 
@@ -82,7 +121,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             noteExtraFilter = "AND account='{}' AND method_name NOT LIKE 'en_prep%'".format(account)
             if parsed_query["tags"][0] == "random" :
                 limit = 20
-                print("random limit: ", limit)
 
             if (not isLoad) or (parsed_query["tags"][0] == "random"):
                 for method_name in methods:
@@ -155,7 +193,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 time = parsed_query["time"][0]
                 method_name = parsed_query["method_name"][0]
                 db_operator.cur.execute("DELETE FROM record_data WHERE id=? AND time=? AND method_name=?", (targetId, time, method_name))
-                print("deleting record: ", targetId, time, method_name)
             else :
                 print("operation not supported: ", operation)
 
@@ -200,7 +237,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator.close()
         
         elif parsed_query["type"][0] == "unote" :
-            print("unote")
             db_operator = DataBaseOperator()
             db_operator.cur.execute("SELECT method_name,method_time FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
             result = db_operator.cur.fetchall()
@@ -210,12 +246,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 }
             else:
                 db_operator.cur.execute(f"SELECT que from {METHOD_NAME_TO_TABLE_NAME[result[0][0]]} WHERE time={result[0][1]}")
-                print("unote: " , db_operator.cur.fetchall())
                 db_operator.cur.execute("DELETE FROM notes WHERE time=?", (int(parsed_query["time"][0]),))
                 response = {
                     "status": "success"
                 }
-                print("unote: ", parsed_query["time"][0])
             db_operator.close()
 
         elif parsed_query["type"][0] == "createAccount" :
@@ -258,27 +292,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator.close()
         
         elif parsed_query["type"][0] == "add" :
-            db_operator = DataBaseOperator()
-            que = parsed_query["que"][0]
-            ans = parsed_query["ans"][0]
-            if not "tags" in parsed_query:
-                tags = ""
-            else:
-                tags = parsed_query["tags"][0]
-            
-            db_operator.cur.execute("SELECT tags FROM en_voc WHERE que=?", (que,))
-            old_tags = db_operator.cur.fetchall()
-            if len(old_tags) > 0:
-                finalTags = mergeEncodedTags(("|" + tags + "|", old_tags[0][0])) + "|"
-                db_operator.cur.execute("UPDATE en_voc SET ans=?, tags=? WHERE que=?", (ans, finalTags, que))
-            else :
-                finalTags = "|" + tags + "|"
-                db_operator.cur.execute("INSERT INTO en_voc (que, ans, tags, time, level) VALUES (?, ?, ?, strftime('%s','now'), ?)", (que, ans, finalTags, getLevelFromWord(que)))
-            
-            db_operator.close()
-            response = {
-                "status": "success"
-            }
+            response = self.handle_add(parsed_query)
         
         elif parsed_query["type"][0] == "finishWriting" :
             scoreThread = threading.Thread(target=scorer.startScoring, args=(Scores, wv))
@@ -297,6 +311,8 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             response = self.handle_getSentence(parsed_query)
         elif parsed_query["type"][0] == "RegenerateSentence":
             response = self.handle_regenerateSentence(parsed_query)
+        elif parsed_query["type"][0] == "getDefinition":
+            response = self.handle_getDefinition(parsed_query)
 
 
         if "type" in parsed_query :
@@ -348,7 +364,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         
         # get the the query
         query = urllib.parse.urlparse(self.path).query
-        print("post query: ", query)
         # parse the query
         parsed_query = urllib.parse.parse_qs(query)
         # get the json code form the body
@@ -382,9 +397,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator = DataBaseOperator()
             operation = parsed_query["operation"][0]
             targetId = parsed_query["targetId"][0]
-            print("operation: ", operation)
             if operation == "reset" :
-                print("resetting record: ", targetId)
                 method_names = json_data["method_names"]
                 times = json_data["times"]
                 db_operator.cur.execute("DELETE FROM record_data WHERE id=?", (targetId,))
@@ -400,9 +413,9 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def run(server_class=HTTPServer, handler_class=SimpleHTTPRequestHandler, port=8000):
+def run(handler_class=SimpleHTTPRequestHandler, port=8000):
     server_address = ('', port)
-    httpd = server_class(server_address, handler_class)
+    httpd = ThreadedHTTPServer(server_address, handler_class)
     httpd.socket.settimeout(60)
     httpd.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 50000)
     print(f"Server started on port {port}")
@@ -543,20 +556,16 @@ def mergeEncodedList(strs:Tuple[str]):
     return encodeList(all_tags)
 
 def decodeTags(tagss:str) -> List[List[str]]:
-    print("decode input: ",tagss)
     res = []
     tags = decodeList(tagss)
     for tag in tags:
         res.append(["|" + t + "|" for t in tag.split('&')])
-    print("decode output: ",res)
     return res
 
 def encodeTags(list:List[List[str]]) -> str:
-    print("encode input: ",list)
     tags_strs = []
     for tag in list:
         tags_strs.append('&'.join([t.replace("|",'') for t in tag]))
-    print("encode output: ",tags_strs)
     return encodeList(tags_strs)
 
 def mergeEncodedTags(strs:Tuple[str]):
@@ -707,7 +716,6 @@ def updateLevel() :
     result = db_operator.cur.fetchall()
     for (que,) in result:
         level = getLevelFromWord(que)
-        print(que, level)
         db_operator.cur.execute("UPDATE en_voc SET level=? WHERE que=?", (getLevelFromWord(que), que))
 
     db_operator.cur.execute("SELECT method_name, method_time FROM notes")
@@ -766,6 +774,7 @@ def reGenerateSentence(word, meaning):
 def requestSentence(word, meaning) -> str:
     response = requests.post(
         "https://api.openai.com/v1/chat/completions",
+        timeout=5,
         headers={
             "Authorization": "Bearer " + OPENAI_API_KEY,
             "Content-Type": "application/json"
@@ -785,7 +794,63 @@ def requestSentence(word, meaning) -> str:
         }
     )
     if response.status_code == 200:
+        if "error" in response.json():
+            return "some error occurred. Please try again later."
         return response.json()["choices"][0]["message"]["content"]
+    return "some api error occurred. Please try again later."
+    
+def requestDefinition(word) -> str:
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        timeout=5,
+        headers={
+            "Authorization": "Bearer " + OPENAI_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Provide plenty of the common Chinese definition in the format: 'n. 可怕的|adj. 令人害怕的'. Use Traditional Chinese."
+                },
+                {
+                    "role": "user",
+                    "content": word
+                }
+            ],
+            "max_tokens": 100
+        }
+    )
+    if response.status_code == 200:
+        if "error" in response.json():
+            return "some error occurred. Please try again later."
+        return response.json()["choices"][0]["message"]["content"]
+    return "some api error occurred. Please try again later."
+    
+def requestDefinitionToGood(word) -> str:
+    isGood = False
+    i = 0
+    while not isGood:
+        definition = requestDefinition(word)
+        isGood = True
+        if "\n" in definition:
+            isGood = False
+        else:
+            ss = definition.split("|")
+            for s in ss:
+                if s == "":
+                    isGood = False
+                    break
+                if s[0] == " " or s[-1] == " ":
+                    isGood = False
+                    break
+        i += 1
+        if i == 5:
+            definition = "the model output is not good for five times."
+            break
+
+    return definition
 
 with open("configure.json", "r") as f:
     configureJson = json.load(f)
