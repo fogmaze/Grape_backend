@@ -95,7 +95,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 return
             method_name_str = parsed_query["method_name"][0]
             methods = method_name_str.split("|")
-            tag_raw_str = parsed_query["tags"][0].replace("^","&")
+            if "tags" not in parsed_query:
+                tag_raw_str = ""
+            else:
+                tag_raw_str = parsed_query["tags"][0].replace("^","&")
             tags = decodeTags(tag_raw_str)
             tags_str = encodeTags(tags)
             isLoad = parsed_query["isLoad"][0] == "true"
@@ -119,10 +122,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
             limit = 9999999
             noteExtraFilter = "AND account='{}' AND method_name NOT LIKE 'en_prep%'".format(account)
-            if parsed_query["tags"][0] == "random" :
+            if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) :
                 limit = 20
 
-            if (not isLoad) or (parsed_query["tags"][0] == "random"):
+            if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) or (not isLoad):
                 for method_name in methods:
                     extraFilter = ""
                     if (method_name == "notes"):
@@ -580,7 +583,7 @@ def mergeEncodedTags(strs:Tuple[str]):
 def getFilter(tags, levelRange)->str:
     tagLimit_d = tags
     if len(tagLimit_d) == 0:
-        return ""
+        return "True"
 
     tag_limits = []
     for lim in tagLimit_d:
