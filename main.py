@@ -14,16 +14,89 @@ import scorer_py as scorer
 import gensim.downloader as api
 import argparse
 import time as time_module
-
+import pickle
 
 Scores = scorer.Scores()
 wv = None# = api.load("word2vec-google-news-300")
 searchRecords = []
 
+class TestingRecord:
+    data:dict[list[tuple[str]]] = {} # account -> [(method_name, time)]
+    deletedData:dict[list[tuple[str]]] = {} # account -> [(method_name, time, delete_time)]
+    nowIdx:dict[int] = {}
+    fileName:str = ""
+    def __init__(self, fileName:str):
+        self.fileName = fileName
+        self.load()
+        
+    def makeSureExist(self, name): 
+        if name not in self.data:
+            self.data[name] = []
+            self.nowIdx[name] = 0
+            self.deletedData[name] = []
+
+    def save(self) :
+        with open(self.fileName, "wb") as f:
+            pickle.dump(self.data, f)
+            pickle.dump(self.deletedData, f)
+            pickle.dump(self.nowIdx, f)
+
+    def load(self) :
+        if os.path.exists(self.fileName):
+            with open(self.fileName, "rb") as f:
+                self.data = pickle.load(f)
+                self.deletedData = pickle.load(f)
+                self.nowIdx = pickle.load(f)
+
+    def updateReviewElement(self, account:str) :
+        changed = False
+        for i in range(len(self.deletedData[account])-1, -1, -1):
+            if self.deletedData[account][i][2] + 60 * 60 * 24 * 4 < int(time_module.time()):
+                self.data[account].append((self.deletedData[account][i][0], self.deletedData[account][i][1]))
+                changed = True
+            elif self.deletedData[account][i][2] + 60 * 60 * 24 * 10 < int(time_module.time()):
+                self.data[account].append((self.deletedData[account][i][0], self.deletedData[account][i][1]))
+                self.deletedData[account].pop(i)
+                changed = True
+        if changed:
+            self.save()
+
+    def deleteElement(self, account:str, idx:int) :
+        for i in range(len(self.deletedData[account])):
+            if self.deletedData[account][i][0] == self.data[account][idx][0] and self.deletedData[account][i][1] == self.data[account][idx][1]:
+                self.data[account].pop(idx)
+                self.save()
+                return
+        self.deletedData[account].append((self.data[account][idx][0], self.data[account][idx][1], int(time_module.time())))
+        self.data[account].pop(idx)
+        self.save()
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in a separate thread."""
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+
+    def handle_removeSubNoteIdx(self, query) :
+        acc = query["account"][0]
+        subNoteRecords.makeSureExist(acc)
+        subNoteRecords.deleteElement(acc, int(query["idx"][0]))
+        return {
+            "status": "success"
+        }
+
+    def handle_getRecordHistory(self, query) :
+        db_operator = DataBaseOperator()
+        db_operator.cur.execute("SELECT id,method_names,tags FROM record_list WHERE account=? ORDER BY id DESC LIMIT 40", (query["account"][0],))
+        result = db_operator.cur.fetchall()
+        if len(result) == 0:
+            return {
+                "status": "fail"
+            }
+        else :
+            return {
+                "status": "success",
+                "data": result
+            }
 
     def handle_getSentence(self, query) :
         word = query["word"][0]
@@ -77,7 +150,313 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         return {
             "status": "success"
         }
+    def hanele_subNoteAdd(self, query) :
+        acc = query["account"][0]
+        subNoteRecords.makeSureExist(acc)
+        method_name = query["method_name"][0]
+        time = int(query["method_time"][0])
+        subNoteRecords.data[acc].append((method_name, time))
+        subNoteRecords.save()
+        return {
+            "status": "success"
+        }
+    def handle_resetSubNote(self, query) :
+        acc = query["account"][0]
+        subNoteRecords.makeSureExist(acc)
+        subNoteRecords.data[acc] = []
+        subNoteRecords.nowIdx[acc] = 0
+        subNoteRecords.save()
+        return {
+            "status": "success"
+        }
 
+    def handle_subNoteUpdate(self, query, json_data) :
+        acc = query["account"][0]
+        subNoteRecords.makeSureExist(acc)
+        method_names = json_data["method_names"]
+        times = json_data["times"]
+        subNoteRecords.data[acc] = []
+        subNoteRecords.nowIdx[acc] = 0
+        for i in range(len(method_names)):
+            subNoteRecords.data[acc].append((method_names[i], times[i]))
+        subNoteRecords.save()
+        return {
+            "status": "success"
+        }
+
+    def handle_subNoteUpdateIdx(self, query) :
+        acc = query["account"][0]
+        subNoteRecords.makeSureExist(acc)
+        subNoteRecords.nowIdx[acc] = int(query["idx"][0])
+        subNoteRecords.save()
+        return {
+            "status": "success"
+        }
+
+    def handle_newReget(self, parsed_query) :
+        ret_value = []
+        account = parsed_query["account"][0]
+        if "method_name" not in parsed_query:
+            return {
+                "status": "fail"
+            }
+        method_name_str = parsed_query["method_name"][0]
+        methods = method_name_str.split("|")
+        if "tags" not in parsed_query:
+            tag_raw_str = ""
+        else:
+            tag_raw_str = parsed_query["tags"][0].replace("^","&")
+        tags = decodeTags(tag_raw_str)
+        tags_str = encodeTags(tags)
+        isLoad = parsed_query["isLoad"][0] == "true"
+        minLevel = int(parsed_query["minLevel"][0])
+        maxLevel = int(parsed_query["maxLevel"][0])
+
+        db_operator = DataBaseOperator()
+
+        objs = []
+        nowTestingIdx = 0
+
+        limit = 9999999
+        noteExtraFilter = "AND account='{}' AND method_name NOT LIKE 'en_prep%'".format(account)
+        if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) :
+            limit = 20
+
+        if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) or (not isLoad):
+            for method_name in methods:
+                extraFilter = ""
+                if (method_name == "notes"):
+                    extraFilter = noteExtraFilter
+                db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags, (minLevel, maxLevel))} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
+                times = db_operator.cur.fetchall()
+                # get the results
+                for t in times:
+                    if method_name in METHOD_HANDLER_DICT:
+                        objs.append(METHOD_HANDLER_DICT[method_name](method_name, t[0], account))
+                    else :
+                        objs.append(default_method_handler(method_name, t[0], account))
+                    # remove the None objects
+                    objs = [obj for obj in objs if obj is not None]
+                # shuffle the results
+            random.shuffle(objs)
+        else :
+            allData = []
+            for method_name in methods:
+                extraFilter = ""
+                if (method_name == "notes"):
+                    extraFilter = noteExtraFilter
+                db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags, (minLevel, maxLevel))} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
+                times = db_operator.cur.fetchall()
+                allData += [(method_name, time) for time in times]
+
+            mainRecords.makeSureExist(account)
+            newlyAdded = []
+            for d in allData:
+                # find in the main records
+                if not d in mainRecords.data[account]:
+                    newlyAdded.append(d)
+
+            if len(newlyAdded) > 0:
+                print("newly added length: ", len(newlyAdded))
+                mainRecords.data[account] += newlyAdded
+                mainRecords.save()
+
+
+            decodedMainData = []
+            mainRecords.makeSureExist(account)
+            for (method_name, time) in mainRecords.data[account]:
+                if method_name in METHOD_HANDLER_DICT:
+                    decodedMainData.append(METHOD_HANDLER_DICT[method_name](method_name, time, account))
+                else :
+                    decodedMainData.append(default_method_handler(method_name, time, account))
+            
+            
+
+
+
+            db_operator.cur.execute("SELECT time,method_name FROM record_data WHERE id=?", (nowId,))
+            results = db_operator.cur.fetchall()
+            nonTested = []
+            tested = []
+            for time, method_name in results :
+                if method_name in METHOD_HANDLER_DICT:
+                    nonTested.append(METHOD_HANDLER_DICT[method_name](method_name, time, account=account))
+                else :
+                    nonTested.append(default_method_handler(method_name, time, account))
+            for method_name in methods :
+                if method_name == "":
+                    continue
+                extraFilter = ""
+                if (method_name == "notes"):
+                    extraFilter = noteExtraFilter
+                db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags, (minLevel, maxLevel))} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
+                results = db_operator.cur.fetchall()
+                for time in results:
+                    if method_name in METHOD_HANDLER_DICT:
+                        tested.append(METHOD_HANDLER_DICT[method_name](method_name, time[0], account=account))
+                    else :
+                        tested.append(default_method_handler(method_name, time[0], account))
+                random.shuffle(tested)
+            # remove the None objects
+            tested = [obj for obj in tested if obj is not None]
+            nonTested = [obj for obj in nonTested if obj is not None]
+            objs = tested + nonTested
+            nowTestingIdx = len(tested)
+            if len(objs) == nowTestingIdx :
+                nowTestingIdx = 0
+        # save to database
+        db_operator.cur.execute("DELETE FROM record_data WHERE id=?", (nowId,))
+        for obj in objs[nowTestingIdx:]:
+            db_operator.cur.execute("INSERT INTO record_data (id, method_name, time) VALUES (?, ?, ?)", (nowId, obj["name"], obj["time"]))
+        # save to settings
+        db_operator.cur.execute("UPDATE settings SET te_methods=?, te_tags=?, te_lp=?, te_level=?, te_level_max=? WHERE account=?", (method_name_str, tags_str, 1 if parsed_query["isLoad"][0] == "true" else 0, int(parsed_query["minLevel"][0]), int(parsed_query["maxLevel"][0]), account))
+        db_operator.close()
+
+        subNoteRecords.makeSureExist(account)
+        decodedSubData = []
+        for (method_name, time) in subNoteRecords.data[account]:
+            if method_name in METHOD_HANDLER_DICT:
+                decodedSubData.append(METHOD_HANDLER_DICT[method_name](method_name, time, account))
+            else :
+                decodedSubData.append(default_method_handler(method_name, time, account))
+        return {
+            "id": 0,
+            "data": objs,
+            "nowTestingIdx": nowTestingIdx,
+            "subData": decodedSubData,
+            "nowSubIdx": subNoteRecords.nowIdx[account]
+        }
+    
+    def handle_reGet(self, parsed_query) :
+        ret_value = []
+        account = parsed_query["account"][0]
+        if "method_name" not in parsed_query:
+            return {
+                "status": "fail"
+            }
+        method_name_str = parsed_query["method_name"][0]
+        methods = method_name_str.split("|")
+        if "tags" not in parsed_query:
+            tag_raw_str = ""
+        else:
+            tag_raw_str = parsed_query["tags"][0].replace("^","&")
+        tags = decodeTags(tag_raw_str)
+        tags_str = encodeTags(tags)
+        isLoad = parsed_query["isLoad"][0] == "true"
+        minLevel = int(parsed_query["minLevel"][0])
+        maxLevel = int(parsed_query["maxLevel"][0])
+
+        db_operator = DataBaseOperator()
+        db_operator.cur.execute("SELECT id from record_list WHERE method_names=? AND tags=? AND account=?", (method_name_str, tags_str, account))
+        ids = db_operator.cur.fetchall()
+        if len(ids) == 0:
+            ret_value.append("no record found")
+            db_operator.cur.execute("insert into record_list (method_names, tags, account) values (?, ?, ?)", (method_name_str, tags_str, account))
+            db_operator.con.commit()
+            db_operator.cur.execute("SELECT id from record_list WHERE method_names=? AND tags=? AND account=?", (method_name_str, tags_str, account))
+            nowId = db_operator.cur.fetchall()[0][0]
+        else :
+            nowId = ids[0][0]
+
+        objs = []
+        nowTestingIdx = 0
+
+        limit = 9999999
+        noteExtraFilter = "AND account='{}' AND method_name NOT LIKE 'en_prep%'".format(account)
+        if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) :
+            limit = 20
+
+        if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) or (not isLoad):
+            for method_name in methods:
+                extraFilter = ""
+                if (method_name == "notes"):
+                    extraFilter = noteExtraFilter
+                db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags, (minLevel, maxLevel))} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
+                times = db_operator.cur.fetchall()
+                # get the results
+                for t in times:
+                    if method_name in METHOD_HANDLER_DICT:
+                        objs.append(METHOD_HANDLER_DICT[method_name](method_name, t[0], account))
+                    else :
+                        objs.append(default_method_handler(method_name, t[0], account))
+                    # remove the None objects
+                    objs = [obj for obj in objs if obj is not None]
+                # shuffle the results
+            random.shuffle(objs)
+        else :
+            db_operator.cur.execute("SELECT time,method_name FROM record_data WHERE id=?", (nowId,))
+            results = db_operator.cur.fetchall()
+            nonTested = []
+            tested = []
+            for time, method_name in results :
+                if method_name in METHOD_HANDLER_DICT:
+                    nonTested.append(METHOD_HANDLER_DICT[method_name](method_name, time, account=account))
+                else :
+                    nonTested.append(default_method_handler(method_name, time, account))
+            for method_name in methods :
+                if method_name == "":
+                    continue
+                extraFilter = ""
+                if (method_name == "notes"):
+                    extraFilter = noteExtraFilter
+                db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags, (minLevel, maxLevel))} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
+                results = db_operator.cur.fetchall()
+                for time in results:
+                    if method_name in METHOD_HANDLER_DICT:
+                        tested.append(METHOD_HANDLER_DICT[method_name](method_name, time[0], account=account))
+                    else :
+                        tested.append(default_method_handler(method_name, time[0], account))
+                random.shuffle(tested)
+            # remove the None objects
+            tested = [obj for obj in tested if obj is not None]
+            nonTested = [obj for obj in nonTested if obj is not None]
+            objs = tested + nonTested
+            nowTestingIdx = len(tested)
+            if len(objs) == nowTestingIdx :
+                nowTestingIdx = 0
+        # save to database
+        db_operator.cur.execute("DELETE FROM record_data WHERE id=?", (nowId,))
+        for obj in objs[nowTestingIdx:]:
+            db_operator.cur.execute("INSERT INTO record_data (id, method_name, time) VALUES (?, ?, ?)", (nowId, obj["name"], obj["time"]))
+        # save to settings
+        db_operator.cur.execute("UPDATE settings SET te_methods=?, te_tags=?, te_lp=?, te_level=?, te_level_max=? WHERE account=?", (method_name_str, tags_str, 1 if parsed_query["isLoad"][0] == "true" else 0, int(parsed_query["minLevel"][0]), int(parsed_query["maxLevel"][0]), account))
+        db_operator.close()
+
+        subNoteRecords.makeSureExist(account)
+        subNoteRecords.updateReviewElement(account)
+        decodedSubData = []
+        for (method_name, time) in subNoteRecords.data[account]:
+            if method_name in METHOD_HANDLER_DICT:
+                decodedSubData.append(METHOD_HANDLER_DICT[method_name](method_name, time, account))
+            else :
+                decodedSubData.append(default_method_handler(method_name, time, account))
+        return {
+            "id": nowId,
+            "data": objs,
+            "nowTestingIdx": nowTestingIdx,
+            "subData": decodedSubData,
+            "nowSubIdx": subNoteRecords.nowIdx[account]
+        }
+    def handle_search(self, query) :
+        db_operator = DataBaseOperator()
+        que = query["que"][0]
+        db_operator.cur.execute('SELECT que,ans,level FROM {} WHERE que LIKE "%{}%" ORDER BY TIME'.format("en_voc",que))
+        similar_data = db_operator.cur.fetchall()
+        db_operator.close()
+        if len(similar_data) > 0:
+            if similar_data == searchRecords:
+                return {
+                    "status": "same"
+                }
+            else :
+                return {
+                    "status": "success",
+                    "data": sorted(similar_data, key=lambda x: Levenshtein.distance(que, x[0]))[0:5]
+                }
+        else:
+            return {
+                "status": "fail"
+            }
 
     def do_GET(self):
         response = {}
@@ -88,105 +467,24 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         if "type" not in parsed_query:
             pass
         elif parsed_query["type"][0] == "reget" :
-
-            ret_value = []
-            account = parsed_query["account"][0]
-            if "method_name" not in parsed_query:
-                return
-            method_name_str = parsed_query["method_name"][0]
-            methods = method_name_str.split("|")
-            if "tags" not in parsed_query:
-                tag_raw_str = ""
-            else:
-                tag_raw_str = parsed_query["tags"][0].replace("^","&")
-            tags = decodeTags(tag_raw_str)
-            tags_str = encodeTags(tags)
-            isLoad = parsed_query["isLoad"][0] == "true"
-            minLevel = int(parsed_query["minLevel"][0])
-            maxLevel = int(parsed_query["maxLevel"][0])
-
-            db_operator = DataBaseOperator()
-            db_operator.cur.execute("SELECT id from record_list WHERE method_names=? AND tags=? AND account=?", (method_name_str, tags_str, account))
-            ids = db_operator.cur.fetchall()
-            if len(ids) == 0:
-                ret_value.append("no record found")
-                db_operator.cur.execute("insert into record_list (method_names, tags, account) values (?, ?, ?)", (method_name_str, tags_str, account))
-                db_operator.con.commit()
-                db_operator.cur.execute("SELECT id from record_list WHERE method_names=? AND tags=? AND account=?", (method_name_str, tags_str, account))
-                nowId = db_operator.cur.fetchall()[0][0]
-            else :
-                nowId = ids[0][0]
-
-            objs = []
-            nowTestingIdx = 0
-
-            limit = 9999999
-            noteExtraFilter = "AND account='{}' AND method_name NOT LIKE 'en_prep%'".format(account)
-            if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) :
-                limit = 20
-
-            if ("tags" in parsed_query and (parsed_query["tags"][0] == "random")) or (not isLoad):
-                for method_name in methods:
-                    extraFilter = ""
-                    if (method_name == "notes"):
-                        extraFilter = noteExtraFilter
-                    db_operator.cur.execute(f"SELECT time from {METHOD_NAME_TO_TABLE_NAME[method_name]} where {getFilter(tags, (minLevel, maxLevel))} {extraFilter} ORDER BY RANDOM() LIMIT {limit}")
-                    times = db_operator.cur.fetchall()
-                    # get the results
-                    for t in times:
-                        if method_name in METHOD_HANDLER_DICT:
-                            objs.append(METHOD_HANDLER_DICT[method_name](method_name, t[0], account))
-                        else :
-                            objs.append(default_method_handler(method_name, t[0], account))
-                        # remove the None objects
-                        objs = [obj for obj in objs if obj is not None]
-                    # shuffle the results
-                random.shuffle(objs)
-            else :
-                db_operator.cur.execute("SELECT time,method_name FROM record_data WHERE id=?", (nowId,))
-                results = db_operator.cur.fetchall()
-                nonTested = []
-                tested = []
-                for time, method_name in results :
-                    if method_name in METHOD_HANDLER_DICT:
-                        nonTested.append(METHOD_HANDLER_DICT[method_name](method_name, time, account=account))
-                    else :
-                        nonTested.append(default_method_handler(method_name, time, account))
-                for method_name in methods :
-                    if method_name == "":
-                        continue
-                    extraFilter = ""
-                    if (method_name == "notes"):
-                        extraFilter = noteExtraFilter
-                    db_operator.cur.execute(f'SELECT time FROM {METHOD_NAME_TO_TABLE_NAME[method_name]} WHERE {getFilter(tags, (minLevel, maxLevel))} {extraFilter} AND time NOT IN (SELECT time FROM record_data WHERE id={nowId}) ORDER BY RANDOM() LIMIT {limit}')
-                    results = db_operator.cur.fetchall()
-                    for time in results:
-                        if method_name in METHOD_HANDLER_DICT:
-                            tested.append(METHOD_HANDLER_DICT[method_name](method_name, time[0], account=account))
-                        else :
-                            tested.append(default_method_handler(method_name, time[0], account))
-                    random.shuffle(tested)
-                # remove the None objects
-                tested = [obj for obj in tested if obj is not None]
-                nonTested = [obj for obj in nonTested if obj is not None]
-                objs = tested + nonTested
-                nowTestingIdx = len(tested)
-                if len(objs) == nowTestingIdx :
-                    nowTestingIdx = 0
-            response = {
-                "id": nowId,
-                "data": objs,
-                "nowTestingIdx": nowTestingIdx
-            }
-            # save to database
-            db_operator.cur.execute("DELETE FROM record_data WHERE id=?", (nowId,))
-            for obj in objs[nowTestingIdx:]:
-                db_operator.cur.execute("INSERT INTO record_data (id, method_name, time) VALUES (?, ?, ?)", (nowId, obj["name"], obj["time"]))
-            # save to settings
-            db_operator.cur.execute("UPDATE settings SET te_methods=?, te_tags=?, te_lp=?, te_level=?, te_level_max=? WHERE account=?", (method_name_str, tags_str, 1 if parsed_query["isLoad"][0] == "true" else 0, int(parsed_query["minLevel"][0]), int(parsed_query["maxLevel"][0]), account))
-
-            db_operator.close()
-
+            response = self.handle_reGet(parsed_query)
+        elif parsed_query["type"][0] == "getSentence" :
+            response = self.handle_getSentence(parsed_query)
+        elif parsed_query["type"][0] == "RegenerateSentence":
+            response = self.handle_regenerateSentence(parsed_query)
+        elif parsed_query["type"][0] == "getDefinition":
+            response = self.handle_getDefinition(parsed_query)
+        elif parsed_query["type"][0] == "resetSubNote":
+            response = self.handle_resetSubNote(parsed_query)
+        elif parsed_query["type"][0] == "subNoteUpdateIdx":
+            response = self.handle_subNoteUpdateIdx(parsed_query)
+        elif parsed_query["type"][0] == "subNoteAdd":
+            response = self.hanele_subNoteAdd(parsed_query)
+        elif parsed_query["type"][0] == "removeSubNoteIdx":
+            response = self.handle_removeSubNoteIdx(parsed_query)
+        elif parsed_query["type"][0] == "getRecordHistory":
+            response = self.handle_getRecordHistory(parsed_query)
+        
         elif parsed_query["type"][0] == "update_rec" :
             db_operator = DataBaseOperator()
             operation = parsed_query["operation"][0]
@@ -271,28 +569,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             db_operator.close()
 
         elif parsed_query["type"][0] == "search" :
-            db_operator = DataBaseOperator()
-            que = parsed_query["que"][0]
-            result = []
-
-            db_operator.cur.execute('SELECT que,ans FROM {} WHERE que LIKE "%{}%" ORDER BY TIME'.format("en_voc",que))
-            similar_data = db_operator.cur.fetchall()
-
-            if len(similar_data) > 0:
-                if similar_data == searchRecords:
-                    response = {
-                        "status": "same"
-                    }
-                else :
-                    response = {
-                        "status": "success",
-                        "data": sorted(similar_data, key=lambda x: Levenshtein.distance(que, x[0]))[0:5]
-                    }
-            else:
-                response = {
-                    "status": "fail"
-                }
-            db_operator.close()
+            response = self.handle_search(parsed_query)
         
         elif parsed_query["type"][0] == "add" :
             response = self.handle_add(parsed_query)
@@ -309,14 +586,6 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             response = {
                 "tags": getTagList()
             }
-        
-        elif parsed_query["type"][0] == "getSentence" :
-            response = self.handle_getSentence(parsed_query)
-        elif parsed_query["type"][0] == "RegenerateSentence":
-            response = self.handle_regenerateSentence(parsed_query)
-        elif parsed_query["type"][0] == "getDefinition":
-            response = self.handle_getDefinition(parsed_query)
-
 
         if "type" in parsed_query :
             # send status code
@@ -408,6 +677,8 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 for i in range(len(method_names)):
                     db_operator.cur.execute("INSERT INTO record_data (id, method_name, time) VALUES (?, ?, ?)", (targetId, method_names[i], times[i]))
             db_operator.close()
+        elif parsed_query["type"][0] == "subNoteUpdate" :
+            self.handle_subNoteUpdate(parsed_query, json_data)
                 
         self.send_response(200)
         self.send_header("Content-type", "plain/text")
@@ -884,8 +1155,11 @@ METHOD_HANDLER_DICT = {
 with open("wordList.json", "r") as f:
     wordList = json.load(f)
 
-RELATED_NUM = 4
+RELATED_NUM = 3
 NOTED_EXTRA_WEIGHT = 3
+
+subNoteRecords = TestingRecord("subNoteRecords.pickle")
+#mainRecords = TestingRecord("mainRecords.pickle")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
