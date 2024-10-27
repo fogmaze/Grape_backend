@@ -1,3 +1,5 @@
 gensim
 Levenshtein
 numpy
+requests
+argparse
